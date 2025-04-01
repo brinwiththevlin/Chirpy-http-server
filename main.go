@@ -11,9 +11,9 @@ func main() {
 	mux := http.NewServeMux()
 	//fetch files in home directory, removes the prefix /app/
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
-	mux.HandleFunc("/healthz", healthzHandler)
-	mux.HandleFunc("/metrics", cfg.requestCounts)
-	mux.HandleFunc("/reset", cfg.reset)
+	mux.HandleFunc("GET /api/healthz", healthzHandler)
+	mux.HandleFunc("GET /admin/metrics", cfg.requestCounts)
+	mux.HandleFunc("POST /admin/reset", cfg.reset)
 	server := http.Server{Handler: mux, Addr: ":8080"}
 
 	server.ListenAndServe()
@@ -22,7 +22,7 @@ func main() {
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte("OK"))
+	w.Write([]byte("OK\n"))
 }
 
 type apiConfig struct {
@@ -41,12 +41,11 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 
 func (cfg *apiConfig) requestCounts(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write(fmt.Appendf(nil, "Hits: %v", cfg.fileserverHits.Load()))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(fmt.Appendf(nil, "<html> <body> <h1>Welcome, Chirpy Admin</h1> <p>Chirpy has been visited %d times!</p> </body> </html>", cfg.fileserverHits.Load()))
 
 }
 
 func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 }
-
