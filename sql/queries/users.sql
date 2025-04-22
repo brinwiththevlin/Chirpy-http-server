@@ -5,5 +5,5 @@ RETURNING
     *;
 
 -- name: RemoveUsers :exec
-DELETE FROM usres;
+DELETE FROM users;
 

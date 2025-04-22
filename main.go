@@ -10,9 +10,9 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/brinwiththevlin/Chirpy-http-server/internal/database"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
@@ -30,11 +30,11 @@ func main() {
 	mux := http.NewServeMux()
 	//fetch files in home directory, removes the prefix /app/
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
+	mux.HandleFunc("GET /api/healthz", healthzHandler)
 	mux.HandleFunc("GET /admin/metrics", cfg.requestCounts)
 	mux.HandleFunc("POST /admin/reset", cfg.reset)
 	mux.HandleFunc("POST /api/users", cfg.usersHandler)
-	mux.HandleFunc("GET /api/healthz", healthzHandler)
-	mux.HandleFunc("POST /api/validate_chirp", validHandler)
+	mux.HandleFunc("POST /api/chirps", cfg.validHandler)
 
 	server := http.Server{Handler: mux, Addr: ":8080"}
 
@@ -47,9 +47,16 @@ func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK\n"))
 }
 
-func validHandler(w http.ResponseWriter, r *http.Request) {
+type apiConfig struct {
+	fileserverHits atomic.Int32
+	db             *database.Queries
+	platform       string
+}
+
+func (cfg *apiConfig) validHandler(w http.ResponseWriter, r *http.Request) {
 	type reqBody struct {
-		Body string `json:"body"`
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -57,10 +64,12 @@ func validHandler(w http.ResponseWriter, r *http.Request) {
 	err := decoder.Decode(&body)
 	if err != nil {
 		w.WriteHeader(400)
+		log.Println("request body could not be decoded")
 		return
 	}
 	if len(body.Body) >= 140 {
 		w.WriteHeader(400)
+		log.Println("body is too long")
 		return
 	}
 	profane := []string{"kerfuffle", "sharbert", "fornax"}
@@ -72,28 +81,26 @@ func validHandler(w http.ResponseWriter, r *http.Request) {
 			words = append(words, word)
 		}
 	}
-	chirp := strings.Join(words, " ")
+	msg := strings.Join(words, " ")
 
-	type respBody struct {
-		Body string `json:"cleaned_body"`
+	chirp := database.CreateChirpParams{Body: msg, UserID: body.UserID}
+	chirpRow, err := cfg.db.CreateChirp(r.Context(), chirp)
+	if err != nil {
+		w.WriteHeader(500)
+		log.Println("could not log the chirp :\\(")
+		return
 	}
-	retBody := respBody{Body: chirp}
-	dat, err := json.Marshal(&retBody)
+
+	dat, err := json.Marshal(&chirpRow)
 	if err != nil {
 		log.Printf("Error marshaling: %v\n", err)
 		w.WriteHeader(500)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
+	w.WriteHeader(201)
 	w.Write(dat)
 
-}
-
-type apiConfig struct {
-	fileserverHits atomic.Int32
-	db             *database.Queries
-	platform       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -149,21 +156,21 @@ func (cfg *apiConfig) usersHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type respBody struct {
-		ID        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
-	}
+	// type respBody struct {
+	// 	ID        string `json:"id"`
+	// 	CreatedAt string `json:"created_at"`
+	// 	UpdatedAt string `json:"updated_at"`
+	// 	Email     string `json:"email"`
+	// }
+	//
+	// res := respBody{
+	// 	ID:        user.ID.String(),
+	// 	CreatedAt: user.CreatedAt.Local().Format(time.RFC3339),
+	// 	UpdatedAt: user.UpdatedAt.Local().Format(time.RFC3339),
+	// 	Email:     user.Email,
+	// }
 
-	res := respBody{
-		ID:        user.ID.String(),
-		CreatedAt: user.CreatedAt.Local().Format(time.RFC3339),
-		UpdatedAt: user.UpdatedAt.Local().Format(time.RFC3339),
-		Email:     user.Email,
-	}
-
-	dat, err := json.Marshal(&res)
+	dat, err := json.Marshal(&user)
 	if err != nil {
 		log.Printf("Error marshaling: %v\n", err)
 		w.WriteHeader(500)
