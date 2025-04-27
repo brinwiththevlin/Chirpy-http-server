@@ -1,1 +1,1 @@
-go build -o out && ./out
+go build -o out && ./out 2>&1 | tee combined.log

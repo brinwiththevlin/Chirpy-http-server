@@ -37,10 +37,13 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", cfg.requestCounts)
 	mux.HandleFunc("POST /admin/reset", cfg.reset)
 	mux.HandleFunc("POST /api/users", cfg.usersHandler)
+	mux.HandleFunc("PUT /api/users", cfg.userUpdateHandler)
 	mux.HandleFunc("POST /api/chirps", cfg.postHandler)
 	mux.HandleFunc("GET /api/chirps", cfg.chirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.singleChirpHander)
 	mux.HandleFunc("POST /api/login", cfg.loginHandler)
+	mux.HandleFunc("POST /api/refresh", cfg.refreshHandler)
+	mux.HandleFunc("POST /api/revoke", cfg.revokeHandler)
 
 	server := http.Server{Handler: mux, Addr: ":8080"}
 
@@ -58,6 +61,88 @@ type apiConfig struct {
 	db             *database.Queries
 	platform       string
 	secret         string
+}
+
+func (cfg *apiConfig) userUpdateHandler(w http.ResponseWriter, r *http.Request) {
+	tok, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(401)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("unauthorized"))
+		log.Println("post was unauthorized")
+		return
+	}
+	user_id, err := auth.ValidateJWT(tok, cfg.secret)
+	if err != nil {
+		w.WriteHeader(401)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("unauthorized"))
+		log.Println("post was unauthorized")
+		return
+	}
+	type request struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	body := &request{}
+
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&body)
+	if err != nil {
+		w.WriteHeader(400)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("malformated body"))
+		log.Println("malformated body")
+		return
+	}
+
+	hashpass, err := auth.HashPassword(body.Password)
+	if err != nil {
+		w.WriteHeader(500)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("could not hash your password"))
+		log.Println("could not hash your password")
+		return
+	}
+
+	args := database.UpdateUserParams{ID: user_id, Email: body.Email, HashedPassword: hashpass}
+	user, err := cfg.db.UpdateUser(r.Context(), args)
+	if err != nil {
+		w.WriteHeader(500)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("could not update user"))
+		log.Println("could not update user")
+		return
+	}
+
+	noPass := database.CreateUserRow{ID: user.ID, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Email: user.Email}
+
+	dat, err := json.Marshal(&noPass)
+	if err != nil {
+		w.WriteHeader(500)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("could not marshal output"))
+		log.Println("could not marshal output")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(dat)
+}
+
+func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
+	tok, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(401)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("unauthorized"))
+		log.Println("post was unauthorized")
+		return
+	}
+	cfg.db.RevokeRefreshToken(r.Context(), tok)
+	w.WriteHeader(204)
 }
 
 func (cfg *apiConfig) singleChirpHander(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +174,7 @@ func (cfg *apiConfig) singleChirpHander(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(500)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("unable to marshal"))
-		log.Println("unable to marshal")
+		log.Println("unable to marshal chirp")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
@@ -119,9 +204,63 @@ func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("Error marshaling"))
+		log.Println("Error marhaling chirp")
 		return
 	}
 
+	w.Write(dat)
+}
+
+func (cfg *apiConfig) refreshHandler(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+
+	if err != nil {
+		w.WriteHeader(401)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("unauthorized"))
+		log.Println("post was unauthorized")
+		return
+	}
+
+	refreshToken, err := cfg.db.GetRefreshToken(r.Context(), token)
+	if err != nil {
+		w.WriteHeader(401)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("unauthorized"))
+		log.Println("post was unauthorized")
+		return
+	}
+
+	if refreshToken.ExpiresAt.Sub(time.Now()) < 0 || refreshToken.RevokedAt.Valid {
+		w.WriteHeader(401)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("unauthorized"))
+		log.Println("post was unauthorized")
+		return
+	}
+
+	jwtToken, err := auth.MakeJWT(refreshToken.UserID, cfg.secret, time.Hour)
+	if err != nil {
+		w.WriteHeader(500)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("unauthorized"))
+		log.Println("faild to create new JWT")
+		return
+	}
+	type tokenResponse struct {
+		Token string `json:"token"`
+	}
+	ret := &tokenResponse{Token: jwtToken}
+	dat, err := json.Marshal(ret)
+	if err != nil {
+		w.WriteHeader(500)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("unauthorized"))
+		log.Println("Error marshaling token")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
 	w.Write(dat)
 }
 
@@ -135,13 +274,15 @@ func (cfg *apiConfig) postHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("unauthorized"))
+		log.Println("post was unauthorized")
 		return
 	}
 	uid, err := auth.ValidateJWT(token, cfg.secret)
 	if err != nil {
-		w.WriteHeader(500)
+		w.WriteHeader(401)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("could not validate JWT"))
+		log.Println("could not validate JWT")
 		return
 	}
 	decoder := json.NewDecoder(r.Body)
@@ -197,6 +338,7 @@ func (cfg *apiConfig) postHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("Error marshaling"))
 		w.WriteHeader(500)
+		log.Println("error marshaling chirp row")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -237,6 +379,7 @@ func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("could not remove all users"))
+		log.Println("could not remove all users")
 		return
 	}
 
@@ -244,9 +387,8 @@ func (cfg *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 	type reqBody struct {
-		Password      string `json:"password"`
-		Email         string `json:"email"`
-		ExpireSeconds *int   `json:"expires_in_seconds,omitempty"`
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -257,6 +399,7 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("could not decode request body"))
+		log.Println("could not decode request body")
 		return
 	}
 
@@ -265,25 +408,16 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("incorrect email or password"))
+		log.Println("incorrect email or password")
 		return
 	}
 
-	var expireSeconds time.Duration
-	if body.ExpireSeconds == nil || *body.ExpireSeconds > 3600 {
-		expireSeconds = time.Hour
-	} else if *body.ExpireSeconds > 0 {
-		expireSeconds = time.Duration(*body.ExpireSeconds)
-	} else {
-		w.WriteHeader(400)
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte("invalid expiration time, time must be positive"))
-		return
-	}
-	token, err := auth.MakeJWT(user.ID, cfg.secret, expireSeconds)
+	token, err := auth.MakeJWT(user.ID, cfg.secret, time.Hour)
 	if err != nil {
 		w.WriteHeader(500)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("could not make JWT"))
+		log.Println("could not make JWT")
 		return
 	}
 
@@ -292,22 +426,37 @@ func (cfg *apiConfig) loginHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("incorrect email or password"))
+		log.Println("incorrect email or password")
+		return
+	}
+
+	refreshToken, _ := auth.MakeRefreshToken()
+	args := database.CreateRefreshTokenParams{UserID: user.ID, ExpiresAt: time.Now().Add(time.Hour * 24 * 60), Token: refreshToken}
+	refresh, err := cfg.db.CreateRefreshToken(r.Context(), args)
+
+	if err != nil {
+		w.WriteHeader(500)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("cant store new refresh token"))
+		log.Println("cant store new refresh token")
 		return
 	}
 
 	noPass := database.CreateUserRow{ID: user.ID, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Email: user.Email}
 
 	type ret struct {
-		Token string `json:"token"`
+		Refresh string `json:"refresh_token"`
+		Token   string `json:"token"`
 		database.CreateUserRow
 	}
 
-	retStruct := ret{Token: token, CreateUserRow: noPass}
+	retStruct := ret{Token: token, CreateUserRow: noPass, Refresh: refresh.Token}
 	dat, err := json.Marshal(&retStruct)
 	if err != nil {
 		w.WriteHeader(500)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("Error marshaling"))
+		log.Println("Error mashaling")
 		return
 	}
 
@@ -331,6 +480,7 @@ func (cfg *apiConfig) usersHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte("could not decode request body"))
+		log.Println("could not decode request body")
 		return
 	}
 
